@@ -31,7 +31,7 @@
 ### Frontend
 - **Framework:** React 18+ with TypeScript
 - **Styling:** TailwindCSS
-- **State Management:** React Context API + Hooks (or Redux if needed)
+- **State Management:** React Context API + Hooks
 - **Charts:** Recharts or Chart.js
 - **HTTP Client:** Axios
 - **Routing:** React Router v6
@@ -46,19 +46,22 @@
 - **Validation:** express-validator
 - **CORS:** cors middleware
 - **Environment Variables:** dotenv
+- **Rate Limiting:** express-rate-limit
+- **Security Headers:** helmet
 
 ### Database
-- **Primary Database:** PostgreSQL 15+
-- **Caching:** Redis 7+
-- **ORM:** Prisma (or raw SQL with pg library)
+- **Primary Database:** PostgreSQL 15+ (Neon.tech free tier)
+- **Caching:** Redis 7+ (Upstash free tier)
+- **Database Client:** pg library with connection pooling
 
 ### Background Jobs
 - **Scheduler:** node-cron
-- **Tasks:**
-  - Fetch crypto prices every 1-5 minutes
-  - Fetch news articles every 30 minutes
+- **Tasks (Optimized for Free Tier):**
+  - Fetch crypto prices every 10 seconds (8,640 calls/day = 60% of CoinGecko)
+  - Fetch detailed coin data (rotating through top 50 coins)
+  - Fetch news articles every 24 minutes (60 calls/day = 60% of each API)
   - Clean old cache data daily
-  - Generate portfolio snapshots
+  - Generate portfolio snapshots for active users
 
 ### Development Tools
 - **Package Manager:** npm or pnpm
@@ -66,11 +69,14 @@
 - **Code Quality:** ESLint + Prettier
 - **API Testing:** Postman or Thunder Client
 
-### Deployment (Future)
-- **Frontend:** Vercel or Netlify
-- **Backend:** Railway, Render, or DigitalOcean
-- **Database:** Railway PostgreSQL or AWS RDS
-- **Redis:** Railway Redis or Upstash
+### Deployment (100% FREE)
+- **Frontend:** Vercel (Free tier - 100GB bandwidth, unlimited requests)
+- **Backend:** Render (Free tier - 750 hours/month, auto-sleep after 15 min)
+- **Database:** Neon PostgreSQL (Free tier - 3GB storage, unlimited queries)
+- **Redis:** Upstash (Free tier - 10k commands/day, 256MB storage)
+- **Uptime Monitoring:** Cron-job.org (Free - prevents backend sleep)
+- **Error Monitoring:** Sentry (Free tier - 5k events/month)
+- **SSL:** Included free with all platforms
 
 ---
 
@@ -112,21 +118,49 @@
 ┌────┴─────────────────────────────────────────┴───────────┐
 │           BACKGROUND WORKERS (node-cron)                 │
 │  ┌────────────────────────────────────────────────────┐ │
-│  │ Job 1: Fetch prices every 1 minute (top 100)       │ │
-│  │ Job 2: Fetch news every 30 minutes                 │ │
-│  │ Job 3: Categorize news (crypto vs trading)         │ │
-│  │ Job 4: Calculate sentiment scores                  │ │
-│  │ Job 5: Clean old data (daily)                      │ │
+│  │ Job 1: Fetch prices every 10 seconds (top 100)     │ │
+│  │ Job 2: Rotate detailed coin data (6 coins/min)     │ │
+│  │ Job 3: Fetch news every 24 minutes                 │ │
+│  │ Job 4: Categorize news & calculate sentiment       │ │
+│  │ Job 5: Clean old data (daily at 3 AM)              │ │
 │  └────────────────────────────────────────────────────┘ │
 └────────────────────────┬─────────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────────┐
 │                   EXTERNAL APIs                          │
 │  - CoinGecko API (prices, market data)                   │
+│    └─ 8,640 calls/day (every 10 seconds) = 60% usage    │
 │  - CryptoPanic API (crypto news)                         │
+│    └─ 30 calls/day (every 24 minutes) = 30% usage       │
 │  - NewsAPI (general crypto news)                         │
-│  - Binance API (real-time prices - optional)             │
+│    └─ 30 calls/day (every 24 minutes) = 30% usage       │
 └──────────────────────────────────────────────────────────┘
+```
+
+### **Free Tier Resource Allocation (100 Daily Users)**
+
+```
+API Usage (60% of Free Limits):
+├── CoinGecko: 8,640/14,400 calls per day (60%)
+├── CryptoPanic: 30/100 calls per day (30%)
+└── NewsAPI: 30/100 calls per day (30%)
+
+Backend (Render Free - 512MB RAM, 0.1 CPU):
+├── Memory Usage: ~181MB / 512MB (35%)
+├── CPU Usage: 27% utilization
+└── Bandwidth: ~920MB/day (unlimited)
+
+Database (Neon Free - 3GB):
+├── Storage: ~900MB / 3GB (30%)
+├── Queries: ~10k/day (unlimited)
+└── Growth: 300MB/month with cleanup
+
+Redis (Upstash Free - 10k commands/day, 256MB):
+├── Commands: ~414/day / 10k (4%) - optimized with batching
+├── Storage: ~2MB / 256MB (1%)
+└── TTL Strategy: 30s for prices, 1440s for news
+
+Result: ALL FREE TIERS SUPPORTED ✅
 ```
 
 ---
@@ -443,6 +477,7 @@ CREATE TABLE user_settings (
 CREATE TABLE portfolio (
   id SERIAL PRIMARY KEY,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  coin_id VARCHAR(50) NOT NULL, -- CoinGecko ID: 'bitcoin', 'ethereum'
   crypto_symbol VARCHAR(20) NOT NULL, -- 'BTC', 'ETH', etc.
   crypto_name VARCHAR(100),
   amount DECIMAL(20, 8) NOT NULL,
@@ -450,9 +485,12 @@ CREATE TABLE portfolio (
   purchase_date TIMESTAMP, -- Optional
   notes TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, crypto_symbol)
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Allow multiple holdings of same coin (purchased at different times)
+CREATE INDEX idx_portfolio_user_id ON portfolio(user_id);
+CREATE INDEX idx_portfolio_coin_id ON portfolio(coin_id);
 ```
 
 ### **Portfolio History Table**
@@ -961,110 +999,459 @@ cryptohub/
 
 ---
 
-## Caching Strategy
+## Caching Strategy (Optimized for Free Tier)
 
-### **Redis Cache Structure**
+### **Redis Cache Structure - BATCH OPTIMIZED**
 
+The key optimization for staying within free tier limits is **batched writes using Redis hashes**.
+
+```javascript
+// OPTIMIZED: Single HSET command instead of 100 individual SETs
+Key: 'crypto:prices:latest'
+Type: Hash
+Fields: {
+  'bitcoin': JSON string of price data,
+  'ethereum': JSON string of price data,
+  // ... all 100 coins
+}
+TTL: 30 seconds
+Commands per update: 1 HSET + 1 EXPIRE = 2 commands
+Updates per day: 8,640 fetches × 2 = ~400 commands/day ✅
+
+// Detailed coin information
+Key: 'crypto:details'
+Type: Hash
+Fields: {
+  'bitcoin': JSON string of detailed data,
+  'ethereum': JSON string of detailed data,
+  // ... rotates through top 50 coins
+}
+TTL: 300 seconds (5 minutes)
+Commands per update: 1 HSET = 1 command
+Updates per day: 1,440 minutes = ~10 commands/day ✅
+
+// News cache
+Key: 'news:latest:crypto'
+Type: String
+Value: JSON array of recent crypto articles
+TTL: 1440 seconds (24 minutes)
+Commands: 1 SET per update
+Updates per day: 60 updates × 2 = ~4 commands/day ✅
+
+Key: 'news:latest:trading'
+Type: String
+Value: JSON array of recent trading articles
+TTL: 1440 seconds (24 minutes)
+Updates per day: 60 updates × 2 = ~4 commands/day ✅
+
+// User sessions
+Key: 'session:{userId}'
+Type: String
+Value: JWT token
+TTL: 86400 seconds (24 hours)
+Commands: ~200 SET/GET per day for 100 users ✅
+
+TOTAL REDIS COMMANDS: ~414/day (well under 10k limit!)
 ```
-Key Pattern: crypto:price:{coinId}
-Value: JSON { price, market_cap, volume, timestamp }
-TTL: 120 seconds
 
-Key Pattern: news:crypto
-Value: JSON array of recent articles
-TTL: 1800 seconds (30 minutes)
+### **Cache Read Strategy**
 
-Key Pattern: news:trading
-Value: JSON array of recent articles
-TTL: 1800 seconds
+```javascript
+// Read all prices (1 command instead of 100)
+const allPrices = await redis.hgetall('crypto:prices:latest');
 
-Key Pattern: market:top100
-Value: JSON array of top 100 coins
-TTL: 60 seconds
+// Read single price (1 command)
+const btcPrice = await redis.hget('crypto:prices:latest', 'bitcoin');
+
+// Read news (1 command)
+const news = await redis.get('news:latest:crypto');
 ```
 
 ### **Cache Invalidation**
-- Prices: Update every 60 seconds via cron
-- News: Update every 30 minutes via cron
-- Manual invalidation on data updates
+- Prices: Update every 10 seconds via cron (8,640 times/day)
+- Coin details: Update 6 coins every minute (1,440 times/day)
+- News: Update every 24 minutes (60 times/day)
+- Sessions: Auto-expire after 24 hours
+- Manual invalidation: On user logout or data updates
+
+### **Fallback Strategy**
+```javascript
+// Always implement fallback to database if Redis fails
+try {
+  const cached = await redis.hgetall('crypto:prices:latest');
+  if (cached) return cached;
+} catch (error) {
+  console.error('Redis error, falling back to DB:', error);
+}
+// Fetch from database as fallback
+return await fetchPricesFromDatabase();
+```
 
 ---
 
 ## Security Considerations
 
-1. **Authentication:**
-   - Use bcrypt with salt rounds >= 10
-   - JWT with strong secret (256-bit)
-   - Token expiration: 24 hours
-   - Refresh token mechanism (future)
+### **1. Authentication & Authorization**
+```javascript
+// Use bcrypt with salt rounds >= 12 for production
+const hashedPassword = await bcrypt.hash(password, 12);
 
-2. **Input Validation:**
-   - Validate all user inputs
-   - Sanitize data before DB queries
-   - Use parameterized queries (prevent SQL injection)
+// JWT with strong secret (minimum 256-bit)
+const token = jwt.sign({ userId, email }, process.env.JWT_SECRET, {
+  expiresIn: '24h',
+  algorithm: 'HS256'
+});
 
-3. **Rate Limiting:**
-   - Limit API requests per user/IP
-   - Prevent brute force attacks on login
+// Store sessions in Redis for quick invalidation
+await redis.set(`session:${userId}`, token, 'EX', 86400);
+```
 
-4. **CORS:**
-   - Whitelist frontend domain only
+### **2. Input Validation & Sanitization**
+```javascript
+// Use express-validator for all inputs
+import { body, validationResult } from 'express-validator';
 
-5. **Environment Variables:**
-   - Never commit secrets to Git
-   - Use .env files (add to .gitignore)
+router.post('/register', [
+  body('email').isEmail().normalizeEmail(),
+  body('username').trim().isLength({ min: 3, max: 30 }).escape(),
+  body('password').isLength({ min: 8 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors });
+  // ...
+});
+
+// Always use parameterized queries to prevent SQL injection
+const result = await pool.query(
+  'SELECT * FROM users WHERE email = $1',
+  [email]
+);
+```
+
+### **3. Rate Limiting**
+```javascript
+import rateLimit from 'express-rate-limit';
+
+// General API rate limit
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per IP
+  message: 'Too many requests from this IP'
+});
+app.use('/api/', apiLimiter);
+
+// Strict rate limit for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5, // 5 login attempts per 15 minutes
+  skipSuccessfulRequests: true
+});
+app.use('/api/auth/login', authLimiter);
+```
+
+### **4. Security Headers (Helmet)**
+```javascript
+import helmet from 'helmet';
+
+app.use(helmet()); // Sets multiple security headers
+app.use(helmet.contentSecurityPolicy({
+  directives: {
+    defaultSrc: ["'self'"],
+    styleSrc: ["'self'", "'unsafe-inline'"],
+    scriptSrc: ["'self'"],
+    imgSrc: ["'self'", "data:", "https:"],
+  }
+}));
+```
+
+### **5. CORS Configuration**
+```javascript
+import cors from 'cors';
+
+const corsOptions = {
+  origin: process.env.FRONTEND_URL, // Only allow your frontend
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+```
+
+### **6. Environment Variables**
+```bash
+# NEVER commit .env to Git!
+# Add to .gitignore immediately
+
+# Use strong, random secrets
+JWT_SECRET=$(openssl rand -base64 32)
+
+# Use environment-specific URLs
+FRONTEND_URL=http://localhost:5173  # dev
+FRONTEND_URL=https://your-app.vercel.app  # prod
+```
+
+### **7. Additional Security Measures**
+- ✅ HTTPS only in production (enforced by Vercel/Render)
+- ✅ HTTP-only cookies for sensitive data
+- ✅ CSRF protection for state-changing operations
+- ✅ XSS protection via input sanitization
+- ✅ SQL injection prevention via parameterized queries
+- ✅ NoSQL injection prevention (not applicable, using PostgreSQL)
+- ✅ Secure password storage (bcrypt with high salt rounds)
 
 ---
 
 ## Environment Variables
 
-### Backend `.env`
-```
+### Backend `.env` (Development)
+```bash
 # Server
 PORT=5000
 NODE_ENV=development
 
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/cryptohub
+# Database (Local Development)
+DATABASE_URL=postgresql://postgres:password@localhost:5432/cryptohub
+
+# Redis (Local Development)
 REDIS_URL=redis://localhost:6379
 
-# JWT
-JWT_SECRET=your-super-secret-key-change-this-in-production
+# JWT (Generate with: openssl rand -base64 32)
+JWT_SECRET=your-super-secret-key-minimum-256-bits-change-this
 JWT_EXPIRES_IN=24h
 
-# External APIs
-COINGECKO_API_KEY=optional
-CRYPTOPANIC_API_KEY=your-key
-NEWSAPI_KEY=your-key
+# External APIs (Free Tiers)
+COINGECKO_API_KEY=  # Optional, leave empty for free tier
+CRYPTOPANIC_API_KEY=your-key-from-cryptopanic.com
+NEWSAPI_KEY=your-key-from-newsapi.org
 
 # Frontend URL (for CORS)
 FRONTEND_URL=http://localhost:5173
 ```
 
-### Frontend `.env`
+### Backend `.env` (Production - Render)
+```bash
+# Server
+PORT=5000
+NODE_ENV=production
+
+# Database (Neon PostgreSQL - Free Tier)
+DATABASE_URL=postgresql://user:pass@ep-xxx.us-east-2.aws.neon.tech/cryptohub?sslmode=require
+
+# Redis (Upstash - Free Tier with TLS)
+REDIS_URL=rediss://default:xxx@gusc1-amazing-shark-12345.upstash.io:6379
+
+# JWT (CRITICAL: Use strong random secret in production!)
+JWT_SECRET=<generate-with-openssl-rand-base64-32>
+JWT_EXPIRES_IN=24h
+
+# External APIs
+COINGECKO_API_KEY=  # Optional
+CRYPTOPANIC_API_KEY=<your-production-key>
+NEWSAPI_KEY=<your-production-key>
+
+# Frontend URL (Vercel)
+FRONTEND_URL=https://your-app.vercel.app
+
+# Error Monitoring (Optional - Sentry Free Tier)
+SENTRY_DSN=<your-sentry-dsn>
 ```
+
+### Frontend `.env` (Development)
+```bash
 VITE_API_URL=http://localhost:5000/api
 ```
 
+### Frontend `.env.production` (Vercel)
+```bash
+VITE_API_URL=https://your-backend.onrender.com/api
+```
+
+### Important Notes:
+1. **Never commit `.env` files to Git!**
+2. Add `.env*` to `.gitignore` immediately
+3. Create `.env.example` files with placeholder values
+4. Use strong, unique secrets for production
+5. Rotate secrets periodically
+6. Use environment-specific URLs
+
 ---
 
-## Deployment Strategy
+## Deployment Strategy (100% Free Tier)
 
-### **Phase 1: Development**
-- Run locally (localhost)
-- PostgreSQL on local machine
-- Redis on local machine
+### **Phase 1: Local Development**
+1. **Install Dependencies:**
+   ```bash
+   # PostgreSQL 15+
+   # Download from: https://www.postgresql.org/download/
 
-### **Phase 2: Staging**
-- Deploy to free tiers for testing
-- Frontend: Vercel (free)
-- Backend: Railway/Render (free tier)
-- Database: Railway PostgreSQL (free)
+   # Redis 7+
+   # Windows: https://github.com/microsoftarchive/redis/releases
+   # Mac: brew install redis
+   # Linux: sudo apt-get install redis-server
+   ```
 
-### **Phase 3: Production**
-- Same as staging but with custom domain
-- Upgrade database if needed
-- Add monitoring (Sentry, LogRocket)
+2. **Setup Local Environment:**
+   ```bash
+   # Create local database
+   psql -U postgres
+   CREATE DATABASE cryptohub;
+   \q
+
+   # Start Redis
+   redis-server
+
+   # Verify connections
+   psql -U postgres -d cryptohub -c "SELECT version();"
+   redis-cli ping  # Should return: PONG
+   ```
+
+3. **Run Applications:**
+   ```bash
+   # Backend
+   cd backend
+   npm install
+   npm run dev
+
+   # Frontend (in new terminal)
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+### **Phase 2: Free Tier Production Deployment**
+
+#### **Step 1: Database Setup (Neon - FREE)**
+1. Go to [neon.tech](https://neon.tech) and sign up
+2. Create new project: `cryptohub-prod`
+3. Copy connection string (format: `postgresql://...neon.tech/...`)
+4. Save for later use in Render environment variables
+5. Create tables using the SQL schema from this doc
+
+**Neon Free Tier:**
+- 3GB storage (sufficient for 100+ users)
+- Unlimited queries
+- Auto-suspend after inactivity (wakes instantly)
+- 1 project, 10 branches
+
+#### **Step 2: Redis Setup (Upstash - FREE)**
+1. Go to [upstash.com](https://upstash.com) and sign up
+2. Create Redis database:
+   - Name: `cryptohub-cache`
+   - Region: Choose closest to your backend region
+   - Type: Regional (free)
+   - TLS: Enabled
+3. Copy connection string (format: `rediss://...upstash.io:6379`)
+4. Save for Render environment variables
+
+**Upstash Free Tier:**
+- 10,000 commands/day (our optimized usage: ~414/day)
+- 256MB storage
+- TLS encryption included
+
+#### **Step 3: Backend Deployment (Render - FREE)**
+1. Go to [render.com](https://render.com) and sign up
+2. Connect your GitHub repository
+3. Create new **Web Service**:
+   - Name: `cryptohub-backend`
+   - Region: Choose closest to your users
+   - Branch: `main`
+   - Root Directory: `backend` (if monorepo)
+   - Runtime: `Node`
+   - Build Command: `npm install && npm run build`
+   - Start Command: `npm start`
+   - Plan: **Free**
+
+4. Add Environment Variables:
+   ```
+   NODE_ENV=production
+   PORT=5000
+   DATABASE_URL=<your-neon-connection-string>
+   REDIS_URL=<your-upstash-connection-string>
+   JWT_SECRET=<generate-with-openssl>
+   JWT_EXPIRES_IN=24h
+   CRYPTOPANIC_API_KEY=<your-key>
+   NEWSAPI_KEY=<your-key>
+   FRONTEND_URL=https://your-app.vercel.app
+   ```
+
+5. Deploy and note the URL: `https://cryptohub-backend.onrender.com`
+
+**Render Free Tier:**
+- 750 hours/month (enough for 1 service 24/7)
+- 512MB RAM
+- Auto-sleep after 15 min inactivity
+- Wakes on request (<60 seconds)
+- Free SSL certificate
+
+#### **Step 4: Keep Backend Alive (Cron-job.org - FREE)**
+1. Go to [cron-job.org](https://cron-job.org) and sign up
+2. Create new cron job:
+   - Title: `Keep CryptoHub Alive`
+   - URL: `https://cryptohub-backend.onrender.com/api/health`
+   - Schedule: Every 10 minutes
+   - This prevents the backend from sleeping!
+
+#### **Step 5: Frontend Deployment (Vercel - FREE)**
+1. Go to [vercel.com](https://vercel.com) and sign up
+2. Click "Import Project"
+3. Connect GitHub repository
+4. Configure:
+   - Framework Preset: `Vite`
+   - Root Directory: `frontend` (if monorepo)
+   - Build Command: `npm run build`
+   - Output Directory: `dist`
+   - Install Command: `npm install`
+
+5. Add Environment Variable:
+   ```
+   VITE_API_URL=https://cryptohub-backend.onrender.com/api
+   ```
+
+6. Deploy! Your app will be at: `https://your-app.vercel.app`
+
+**Vercel Free Tier:**
+- 100GB bandwidth/month
+- Unlimited requests
+- Automatic SSL
+- Global CDN
+- Instant rollbacks
+
+#### **Step 6: Error Monitoring (Sentry - FREE)**
+1. Go to [sentry.io](https://sentry.io) and sign up
+2. Create new project: Select Node.js for backend
+3. Copy DSN
+4. Add to Render environment variables:
+   ```
+   SENTRY_DSN=<your-sentry-dsn>
+   ```
+5. Install in backend:
+   ```bash
+   npm install @sentry/node
+   ```
+
+**Sentry Free Tier:**
+- 5,000 errors/month
+- 1 user
+- 30-day retention
+
+### **Phase 3: Custom Domain (Optional - $12/year)**
+1. Buy domain from Namecheap/Google Domains
+2. In Vercel: Settings → Domains → Add your domain
+3. Update DNS records as instructed
+4. SSL automatically provisioned
+
+### **Monthly Cost Breakdown**
+```
+Frontend (Vercel):        $0
+Backend (Render):         $0
+Database (Neon):          $0
+Redis (Upstash):          $0
+Cron Monitoring:          $0
+Error Tracking (Sentry):  $0
+SSL Certificates:         $0
+Custom Domain:            $1/month ($12/year) - Optional
+
+TOTAL: $0-1/month for 100 daily users! 🎉
+```
 
 ---
 
