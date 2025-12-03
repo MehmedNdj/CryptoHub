@@ -4,7 +4,11 @@
       "Bash(npm init:*)",
       "Bash(npm install:*)",
       "Bash(npm create:*)",
-      "Bash(npx tailwindcss:*)"
+      "Bash(npx tailwindcss:*)",
+      "Bash(psql:*)",
+      "Bash(redis-cli:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
